@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const zlib = require('zlib');
-const VERSION = '1.2.1';
+const VERSION = '1.2.2';
 const parseDefinition = require('tera-data-parser/lib/parsers/def');
 const CLASSES = ['warrior', 'lancer', 'slayer', 'berserker', 'sorcerer', 'archer',
   'priest', 'mystic', 'reaper', 'gunner', 'brawler', 'ninja', 'valkyrie'];
@@ -1321,7 +1321,7 @@ module.exports = function SettingsVault(mod) {
     if (String(action || '').toLowerCase() === 'ui') { uiCommand(detail); return; }
     if (String(action || '').toLowerCase() === 'minimap') {
       if (String(detail || '').toLowerCase() === 'pin') {
-        message('Optional minimap fix: close the game and Toolbox, then run minimap.cmd in this module folder. Choose Install or Restore.');
+        message('Minimap setup is automatic for supported clients at a safe startup. Check the Toolbox window for its result. Restart Toolbox before launching TERA; minimap.cmd is only for recovery or manual setup.');
       } else minimapTrace.command(detail);
       return;
     }
@@ -1411,3 +1411,5 @@ module.exports = function SettingsVault(mod) {
 };
 
 module.exports.NetworkMod = module.exports;
+module.exports.GlobalMod = require('./lib/minimap-auto').GlobalMod;
+module.exports.ClientMod = require('./lib/minimap-auto').ClientMod;

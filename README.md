@@ -45,20 +45,19 @@ Source characters continue saving eligible edits while locked. Lower-level/limit
 
 Glyph and equipment presets remain character-bound. Disk-only graphics/INI options are outside the module. Window positions and UI scale are captured only when the game sends them; window dimensions are not part of the observed position list. If positions were not captured, apply/close interface options and relog before saving.
 
-## Optional N-minimap position fix
+## Automatic N-minimap position fix
 
-The settings module works without this patch. The optional fix targets the **verified Asura Windows client resource build**. It keeps the last manually placed N map position across N open/close and map changes. Different resource builds are refused without modification.
+Toolbox automatically detects each connected game's resource path and installs the compatible fix at a safe startup. It keeps the last manually placed N map position across N open/close and map changes. **No manual installer step is needed for a supported client.** After installation, place the N map once; later manual placements become the shared position across maps.
 
-1. Completely close TERA and Toolbox.
-2. Open `minimap.cmd` in the installed module folder.
-3. Choose **1 Install**, then paste the full path to your `TERA.exe` or its game folder.
-4. Start the game and manually place the N map **once**. Test N open/close and changing zones. A later manual placement becomes the shared position for subsequent maps.
+Start Toolbox before launching TERA. Setup runs either before a remembered game is open, or in Toolbox's fresh-client installation stage before the client is resumed. An already running/attached game is never patched; installation is deferred to a safe startup. Busy files and concurrently running clients also defer installation. The Toolbox window reports the result.
 
-To undo it, close TERA/Toolbox, open the same tool, choose **2 Restore** and select the same game. It restores the verified pre-installation file from its local backup. **3 Status** only reads the resource. Already-patched files are left unchanged. Unknown updates and damaged backups are never overwritten.
+Compatibility follows the **actual resource checksum, not the server name**. The verified Asura build is supported; another server with the identical supported resource can use the same fix. Different or updated builds are left unchanged until a matching verified patch is added. Each game installation has its own detection and restore record. The settings module continues working when the map fix is unavailable.
 
-The tool applies a small copy/insert recipe to your own resource; this repository does not distribute the original game package. Backups and installation records stay under `data/`. Keep that folder if you want to restore later. The tool needs the existing Toolbox Electron runtime and does not download another runtime. No original game file is changed automatically during Toolbox startup or module updating. After a game patch, check compatibility with the tool again.
+The fix modifies the matching original game resource, with a hash-verified backup and atomic replacement. Already-patched resources are left alone. Unknown updates and damaged backups are never overwritten. This repository distributes only a small patch recipe, not the original game package. Private paths, preferences and backups stay under `data/`; keep that folder for recovery. No additional runtime is downloaded.
 
-The resulting minimap resource has been confirmed in game on the supported local build. Fresh-machine installation and native preference persistence across all clients have not been independently verified.
+**Recovery:** completely close TERA and Toolbox, open `minimap.cmd` and choose **2 Restore**, then select the game. This restores its verified pre-installation backup and disables automatic map setup for that client. **1 Install** re-enables it; **3 Status** only reads the file. The command file is a fallback, not part of normal installation.
+
+The resulting minimap resource has been confirmed in game on the supported local build. Automatic startup integration is covered by simulated lifecycle and real-file copy tests; a fresh native installation on other clients remains unverified.
 
 ## Personal data and recovery
 
