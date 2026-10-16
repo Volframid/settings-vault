@@ -32,8 +32,6 @@ After that first import, each receiving character saves its **entire bar** separ
 | `vault ui save` / `lock` / `unlock` | Manage UI layout independently. |
 | `vault ui log` | Toggle private UI diagnostics; OFF after restart. |
 | `vault ui mark` | Add a marker while UI logging is active. |
-| `vault minimap log` | Toggle private minimap diagnostics; OFF after restart. |
-| `vault minimap normal` / `shifted` / `fixed` | Mark the map's visual state while logging. |
 
 `vault load` intentionally discards the receiving character's bar customizations. Use it when you want newer source-template changes; already initialized characters are not overwritten automatically.
 

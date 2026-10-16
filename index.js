@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const zlib = require('zlib');
-const VERSION = '1.2.2';
+const VERSION = '1.2.3';
 const parseDefinition = require('tera-data-parser/lib/parsers/def');
 const CLASSES = ['warrior', 'lancer', 'slayer', 'berserker', 'sorcerer', 'archer',
   'priest', 'mystic', 'reaper', 'gunner', 'brawler', 'ninja', 'valkyrie'];
@@ -556,129 +556,6 @@ function validateState(input) {
   return state;
 }
 
-function createMinimapTrace(mod, root, getSnapshot) {
-  let stream = null, file = null, bytes = 0, dropped = 0, lastMovement = -Infinity;
-  let zone = null, channel = null, nativePosition = null, serverPosition = null;
-  const traceHooks = [], hashes = new Map();
-  const maxBytes = 12 * 1024 * 1024;
-  const position = event => event && event.loc && [event.loc.x, event.loc.y, event.loc.z].every(Number.isFinite)
-    ? { x: event.loc.x, y: event.loc.y, z: event.loc.z,
-      w: Number.isFinite(event.w) ? event.w : null } : null;
-  function detach() { for (const h of traceHooks.splice(0)) { try { mod.unhook(h); } catch (_) {} } }
-  function stop(reason = 'command') {
-    if (!stream) return;
-    const current = stream; stream = null; detach();
-    try { current.end(JSON.stringify({ utc: new Date().toISOString(), stage: 'SESSION_END', reason, dropped }) + '\n'); }
-    catch (error) { mod.warn('Minimap log close failed: ' + error.message); }
-  }
-  function write(stage, data = {}) {
-    if (!stream) return;
-    try {
-      if (stream.writableLength > 512 * 1024) { dropped++; return; }
-      const line = JSON.stringify({ utc: new Date().toISOString(), stage, ...data }) + '\n';
-      if (bytes + Buffer.byteLength(line) > maxBytes) {
-        stop('size-limit'); mod.command.message('Minimap log stopped at its size limit.'); return;
-      }
-      bytes += Buffer.byteLength(line); stream.write(line);
-    } catch (error) { stop('write-error'); mod.warn('Minimap log write failed: ' + error.message); }
-  }
-  function context() {
-    return { zone, channel, nativePosition, serverPosition };
-  }
-  function account(data, origin) {
-    if (!stream || !data) return;
-    try {
-      const controllers = document(data).filter(f => f.name).map(f => {
-        const hash = crypto.createHash('sha256').update(f.raw).digest('hex');
-        const include = /minimap|mapcontroller|ui_gfxmanager|gameoption.*interface/i.test(f.name);
-        return { name: f.name, bytes: f.raw.length, hash, raw: include ? f.raw.toString('hex') : undefined };
-      });
-      const hash = crypto.createHash('sha256').update(data).digest('hex');
-      const previous = hashes.get(origin);
-      hashes.set(origin, hash);
-      write('ACCOUNT_UI', { origin, hash, changed: previous == null ? null : previous !== hash,
-        bytes: data.length, controllers, ...context() });
-    } catch (error) { write('ACCOUNT_UI_ERROR', { origin, error: error.message }); }
-  }
-  function rawAccount(buffer, origin) {
-    if (!stream) return;
-    try { account(rawData(buffer), origin); }
-    catch (error) { write('ACCOUNT_PACKET_ERROR', { origin, bytes: buffer && buffer.length, error: error.message }); }
-  }
-  function snapshot(label) {
-    if (!stream) return;
-    try {
-      const saved = getSnapshot();
-      write('MARK', { label, class: saved.class, loaded: saved.loaded,
-        seen: saved.seen, profileLocked: saved.profileLocked, patch: mod.majorPatchVersion, ...context() });
-      account(saved.observed, 'snapshot-observed');
-      account(saved.profile, 'snapshot-profile');
-      if (!saved.observed) write('SNAPSHOT_MISSING', { source: 'observed-account',
-        note: 'No account packet captured in this login yet. A cached profile is not the live UI.' });
-    } catch (error) { write('SNAPSHOT_ERROR', { label, error: error.message }); }
-  }
-  function attach(name, version, callback) {
-    try {
-      traceHooks.push(mod.hook(name, version, { order: -8000, filter: { fake: false } }, event => {
-        if (!stream) return;
-        try { callback(event); } catch (error) { write('OBSERVER_ERROR', { packet: name, error: error.message }); }
-        // Diagnostic observers never alter or suppress the packet.
-      }));
-    } catch (error) { write('HOOK_UNAVAILABLE', { packet: name, error: error.message }); }
-  }
-  function start() {
-    const directory = path.join(root, 'logs');
-    try {
-      fs.mkdirSync(directory, { recursive: true });
-      file = path.join(directory, 'minimap-' + new Date().toISOString().replace(/:/g, '-') + '-' + process.pid + '-' + crypto.randomBytes(3).toString('hex') + '.jsonl');
-      const current = fs.createWriteStream(file, { flags: 'wx', encoding: 'utf8' });
-      stream = current; bytes = 0; dropped = 0; hashes.clear(); lastMovement = -Infinity;
-      nativePosition = null; serverPosition = null;
-      zone = Number.isInteger(mod.game.me.zone) ? mod.game.me.zone : null; channel = null;
-      current.on('error', error => {
-        if (stream === current) { stream = null; detach(); }
-        current.destroy();
-        mod.warn('Minimap log failed: ' + error.message);
-        mod.command.message('Minimap log stopped because the file could not be written.');
-      });
-      attach('S_LOAD_TOPO', 3, event => {
-        zone = event.zone; nativePosition = null; serverPosition = position(event);
-        write('ZONE', { zone, quick: event.quick, ...context() });
-      });
-      attach('S_CURRENT_CHANNEL', 2, event => { zone = event.zone; channel = event.channel; write('CHANNEL', context()); });
-      attach('C_PLAYER_LOCATION', 5, event => {
-        nativePosition = position(event);
-        const time = Date.now();
-        if (time - lastMovement < 250) return;
-        lastMovement = time;
-        write('NATIVE_POSITION', { type: event.type, lookDirection: event.lookDirection, ...context() });
-      });
-      for (const name of ['S_SPAWN_ME', 'S_INSTANT_MOVE', 'S_INSTANT_DASH']) attach(name, 3, event => {
-        if (event.gameId !== mod.game.me.gameId) return;
-        serverPosition = position(event); write(name, context());
-      });
-      write('SESSION_START', { format: 1, moduleVersion: VERSION, mapResourceVariant: 'native-title-load-proof', patch: mod.majorPatchVersion,
-        note: 'Observed settings and world-position context only; no minimap pixels or client-only drag offset are directly observed.' });
-      snapshot('log-start');
-      mod.command.message('Minimap log ON: ' + file + '. Use vault minimap normal / shifted / fixed to mark states.');
-    } catch (error) { stop('start-error'); mod.warn('Minimap log start failed: ' + error.message); mod.command.message('Minimap log could not start. Check the Toolbox warning.'); }
-  }
-  return {
-    account, rawAccount, snapshot, write,
-    command(action) {
-      action = String(action || 'status').toLowerCase();
-      if (action === 'log') {
-        if (stream) { stop(); mod.command.message('Minimap log OFF. File: ' + file); }
-        else start();
-      } else if (['normal', 'shifted', 'fixed'].includes(action)) {
-        if (!stream) { mod.command.message('Use vault minimap log first.'); return; }
-        snapshot(action); mod.command.message('Minimap state marked: ' + action + '.');
-      } else mod.command.message('Minimap log ' + (stream ? 'ON' : 'OFF') + '. Use vault minimap log / normal / shifted / fixed.');
-    },
-    close: () => stop('unload')
-  };
-}
-
 function createUiLayoutTrace(mod, root, getSnapshot) {
   const names = ['C_REQUEST_CLIENT_UI_SETTING', 'S_REPLY_CLIENT_UI_SETTING',
     'C_SAVE_CLIENT_UI_SETTING', 'S_SAVE_CLIENT_UI_SETTING'];
@@ -779,12 +656,6 @@ module.exports = function SettingsVault(mod) {
   let uiDraft = null, uiSource = null, uiAutoSyncAllowed = false;
   const hooks = [], warnings = new Set();
   const message = text => mod.command.message(text);
-  const minimapTrace = createMinimapTrace(mod, root, () => {
-    const p = profile(), legacy = session && state.legacy[session.name + '-' + session.serverId];
-    return { class: session ? CLASSES[session.job] : null, loaded: session ? session.loaded : false,
-      seen: session ? { ...session.seen } : null, profileLocked: p ? p.locked : false,
-      observed: draft.account, profile: p ? hexBuffer(p.account) : legacy ? hexBuffer(legacy.account) : null };
-  });
   const uiLayoutTrace = createUiLayoutTrace(mod, root, () => ({
     class: session ? CLASSES[session.job] : null, loaded: !!(session && session.loaded), account: draft.account
   }));
@@ -1109,17 +980,14 @@ module.exports = function SettingsVault(mod) {
       barMode: 'none', userPacket: null, seen: { account: false, user: false } } : null;
     draft = { account: null, user: null, chat: state.chat.options ? clone(state.chat.options) : null };
     if (!session) warn('class-detection', new Error('Unknown class; original settings will pass through.'));
-    minimapTrace.write('LOGIN', { class: session ? CLASSES[session.job] : null });
   }
   function leave() {
-    minimapTrace.snapshot('leave-game');
     uiLayoutTrace.leave();
     flushPending();
     if (saveTimer !== null) mod.clearTimeout(saveTimer); saveTimer = null;
     session = null; draft = { account: null, user: null, chat: null };
   }
   function onLoad(key, name, opcode, buffer) {
-    if (key === 'account') minimapTrace.rawAccount(buffer, name);
     if (!ready()) return;
     if (key === 'user') { session.keysApplied = false; session.skillsApplied = false; session.characterBarApplied = false; session.barMode = 'none'; session.userPacket = null; }
     try {
@@ -1190,7 +1058,6 @@ module.exports = function SettingsVault(mod) {
             session.characterBarApplied = barReady; session.barMode = barReady ? local ? 'character' : 'template' : 'source/native';
           }
           syncCharacterBar();
-          if (key === 'account') minimapTrace.account(effective, 'profile-applied');
           return false;
         }
         warn(name + '-send', new Error('Replacement was not delivered; original packet was preserved.'));
@@ -1202,7 +1069,6 @@ module.exports = function SettingsVault(mod) {
     } catch (error) { warn(name + '-layout', error); }
   }
   function onSave(key, name, opcode, buffer) {
-    if (key === 'account') minimapTrace.rawAccount(buffer, name);
     if (!ready()) return;
     if (!session.loaded && ((profile() && profile().locked) || (key === 'account' && commonUi().locked) ||
         (key === 'user' && (commonKeys().locked || session.characterBarApplied || commonShortcuts().locked)))) return;
@@ -1223,7 +1089,6 @@ module.exports = function SettingsVault(mod) {
   required.push(hook('S_LOGIN', mod.majorPatchVersion >= 114 ? 15 : 14, onLogin, -9000));
   required.push(hook('C_LOAD_TOPO_FIN', 'event', () => {
     if (session) session.loaded = true;
-    minimapTrace.snapshot('loading-finished');
     seedSharedShortcuts();
     syncCharacterBar();
   }));
@@ -1319,10 +1184,8 @@ module.exports = function SettingsVault(mod) {
   }
   function command(action, detail) {
     if (String(action || '').toLowerCase() === 'ui') { uiCommand(detail); return; }
-    if (String(action || '').toLowerCase() === 'minimap') {
-      if (String(detail || '').toLowerCase() === 'pin') {
-        message('Minimap setup is automatic for supported clients at a safe startup. Check the Toolbox window for its result. Restart Toolbox before launching TERA; minimap.cmd is only for recovery or manual setup.');
-      } else minimapTrace.command(detail);
+    if (String(action || '').toLowerCase() === 'minimap' && String(detail || '').toLowerCase() === 'pin') {
+      message('Minimap setup is automatic for supported clients at a safe startup. Check the Toolbox window for its result. Restart Toolbox before launching TERA; minimap.cmd is only for recovery or manual setup.');
       return;
     }
     refreshState();
@@ -1402,7 +1265,6 @@ module.exports = function SettingsVault(mod) {
   }
   mod.command.add('vault', command);
   this.destructor = () => {
-    minimapTrace.close();
     uiLayoutTrace.close();
     closed = true; leave(); mod.game.removeListener('leave_game', leave);
     for (const h of hooks) mod.unhook(h);
