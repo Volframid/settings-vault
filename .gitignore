@@ -1,0 +1,5 @@
+LOCAL_UPDATES.md
+data/
+logs/
+client/
+*.tmp
