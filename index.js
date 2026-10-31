@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const zlib = require('zlib');
-const VERSION = '1.2.3';
+const VERSION = '1.2.4';
 const parseDefinition = require('tera-data-parser/lib/parsers/def');
 const CLASSES = ['warrior', 'lancer', 'slayer', 'berserker', 'sorcerer', 'archer',
   'priest', 'mystic', 'reaper', 'gunner', 'brawler', 'ninja', 'valkyrie'];
@@ -193,6 +193,21 @@ function completeBar(data) {
     if (payload.length !== sizes[0].value) throw new Error('Native bar size mismatch');
   }
   return Buffer.concat(controllers.map(f => f.raw));
+}
+// A fresh character can emit the native version-only keyboard document after
+// loading. Recognize that reset envelope without interpreting unknown formats.
+function defaultKeyBindings(data) {
+  try {
+    const row = document(data).find(f => f.name === KEY_CONTROLLER);
+    if (!row) return false;
+    const wrapper = fields(row.value), value = wrapper.filter(f => f.number === 20 && f.wire === 2),
+      flag = wrapper.filter(f => f.number === 30 && f.wire === 0), size = wrapper.filter(f => f.number === 40 && f.wire === 0);
+    if (value.length !== 1 || flag.length !== 1 || size.length !== 1 || ![0,1].includes(flag[0].value)) return false;
+    const bytes = flag[0].value ? boundedInflate(value[0].value, size[0].value) : value[0].value;
+    if (bytes.length !== size[0].value) return false;
+    const content = fields(bytes);
+    return content.length > 0 && content.every(f => f.number === 1 && f.wire === 0);
+  } catch (_) { return false; }
 }
 function mergeData(live, saved, ownerMatches, chatUi, skipSharedUi = false, skipSharedKeys = false, skipSkills = false) {
   const original = document(live), stored = document(saved), replacements = new Map();
@@ -655,10 +670,21 @@ module.exports = function SettingsVault(mod) {
   let pendingChat = null, pendingUi = null, pendingKeys = null, pendingShortcuts = null, saveTimer = null, shortcutQuery = null;
   let uiDraft = null, uiSource = null, uiAutoSyncAllowed = false;
   const hooks = [], warnings = new Set();
+  let restoreEvents = [];
   const message = text => mod.command.message(text);
   const uiLayoutTrace = createUiLayoutTrace(mod, root, () => ({
     class: session ? CLASSES[session.job] : null, loaded: !!(session && session.loaded), account: draft.account
   }));
+  // Bounded restore metadata only: no account/character IDs, keys, UI positions or raw settings.
+  function restoreTrace(event, detail = {}) {
+    if (restoreEvents.length >= 24) return;
+    restoreEvents.push({ at: new Date().toISOString(), event, ...detail });
+    try {
+      const directory = path.join(root, 'logs'); fs.mkdirSync(directory, { recursive: true });
+      atomicWrite(path.join(directory, 'restore-status.json'), JSON.stringify({ version: VERSION, patch: mod.majorPatchVersion,
+        class: session ? CLASSES[session.job] : null, events: restoreEvents }, null, 2));
+    } catch (error) { warn('restore-status-write', error); }
+  }
   function warn(key, error) {
     if (warnings.has(key)) return;
     warnings.add(key); mod.warn('Settings Vault: ' + key + ': ' + (error.message || String(error)));
@@ -773,6 +799,18 @@ module.exports = function SettingsVault(mod) {
     try {
       queueCharacterBar(draft.user);
     } catch (error) { warn('character-bar-save', error); }
+  }
+  function initializeMissingBar(user) {
+    const shared = commonShortcuts(), origin = state.classes[String(shared.classJob)];
+    if (!shared.locked || !shared.controller || !uiCompatible(shared) || !origin || !origin.locked || !uiCompatible(origin)) return user;
+    const native = document(user), source = document(completeBar(hexBuffer(origin.user))), additions = [];
+    if (!native.some(f => f.name === 'S1ShortCutController')) {
+      // Preserve the supported native envelope/options, but seed no source class skills.
+      additions.push(writeShortcutRows(shortcutDocument(hexBuffer(shared.controller)), []));
+    }
+    if (!native.some(f => f.name === 'S1SkillHotKeyController'))
+      additions.push(source.find(f => f.name === 'S1SkillHotKeyController').raw);
+    return additions.length ? captureUpdate(user, Buffer.concat(additions)) : user;
   }
   function importBarTemplate(user, force = false) {
     const p = profile(), shared = commonShortcuts();
@@ -910,7 +948,12 @@ module.exports = function SettingsVault(mod) {
     const keys = commonKeys();
     if (key === 'user' && keys.locked && uiCompatible(keys) && session.keysApplied && mayWrite(keys)) {
       const user = keyBindings(keys.user);
-      if (user !== keys.user) pendingKeys = { ...clone(keys), user, savedAt: new Date().toISOString() };
+      if (user !== keys.user) {
+        if (!isBarSource() && defaultKeyBindings(hexBuffer(user)) && !defaultKeyBindings(hexBuffer(keys.user))) {
+          restoreTrace('default-keys-ignored');
+          warn('keys-default-save', new Error('Ignored a receiving character default keyboard save; shared bindings were preserved. Use vault save on the source to reset them deliberately.'));
+        } else pendingKeys = { ...clone(keys), user, savedAt: new Date().toISOString() };
+      }
     }
     const shortcuts = commonShortcuts();
     if (key === 'user' && p && mayUseSkills(p) && shortcuts.locked && mayWrite(shortcuts) && uiCompatible(shortcuts) && sameOwner(shortcuts.source, session) && session.skillsApplied && !session.characterBarApplied) {
@@ -926,6 +969,7 @@ module.exports = function SettingsVault(mod) {
     uiAutoSyncAllowed = false;
     try {
       const incoming = readUiPacket(buffer, false);
+      restoreTrace('ui-reply', { nativeWindows: incoming.length });
       refreshState();
       const shared = commonUi();
       uiDraft = incoming; uiSource = 'server';
@@ -938,10 +982,11 @@ module.exports = function SettingsVault(mod) {
       if (!packet.equals(buffer)) {
         if (mod.toClient(packet) === false) throw new Error('Shared UI was not delivered; original packet was preserved.');
         uiDraft = merged; uiSource = 'shared profile'; uiAutoSyncAllowed = true;
+        restoreTrace('ui-restored', { windows: merged.length });
         return false;
       }
       uiAutoSyncAllowed = true;
-    } catch (error) { uiDraft = null; uiSource = null; warn('ui-reply-layout', error); }
+    } catch (error) { restoreTrace('ui-error', { reason: error.message }); uiDraft = null; uiSource = null; warn('ui-reply-layout', error); }
   }
   function onUiSave(opcode, buffer) {
     try {
@@ -967,6 +1012,10 @@ module.exports = function SettingsVault(mod) {
     catch (error) { warn(name, error); return false; }
   }
   function onLogin(event) {
+    restoreEvents = [];
+    // UI replies may legitimately precede S_LOGIN on a fresh connection.
+    // A previous active session must be cleared; leave() already clears old data.
+    if (session) { uiDraft = null; uiSource = null; uiAutoSyncAllowed = false; }
     flushPending();
     refreshState();
     const me = mod.game.me;
@@ -979,19 +1028,23 @@ module.exports = function SettingsVault(mod) {
       templateId: template, loaded: false, keysApplied: false, skillsApplied: false, characterBarApplied: false,
       barMode: 'none', userPacket: null, seen: { account: false, user: false } } : null;
     draft = { account: null, user: null, chat: state.chat.options ? clone(state.chat.options) : null };
+    restoreTrace('login', { sharedKeys: commonKeys().locked, sharedUi: commonUi().locked, savedWindows: commonUi().windows.length });
     if (!session) warn('class-detection', new Error('Unknown class; original settings will pass through.'));
   }
   function leave() {
+    restoreTrace('leave');
     uiLayoutTrace.leave();
     flushPending();
     if (saveTimer !== null) mod.clearTimeout(saveTimer); saveTimer = null;
     session = null; draft = { account: null, user: null, chat: null };
+    uiDraft = null; uiSource = null; uiAutoSyncAllowed = false;
   }
   function onLoad(key, name, opcode, buffer) {
     if (!ready()) return;
     if (key === 'user') { session.keysApplied = false; session.skillsApplied = false; session.characterBarApplied = false; session.barMode = 'none'; session.userPacket = null; }
     try {
       const incoming = rawData(buffer);
+      restoreTrace('settings-reply', { kind: key, controllers: document(incoming).filter(f => f.name).map(f => f.name) });
       // Old files identify only their original character/server, not a class.
       // Restore only to that character until an explicit class save is made.
       const legacy = !profile() && state.legacy[session.name + '-' + session.serverId];
@@ -1017,6 +1070,10 @@ module.exports = function SettingsVault(mod) {
       if (key === 'user' && keys.locked && !uiCompatible(keys))
         warn('keys-patch-mismatch', new Error('Shared keyboard snapshot belongs to another major patch. Save current keys again before locking.'));
       if (applyKeys) effective = mergeData(effective, hexBuffer(keys.user), false, null);
+      if (key === 'user' && barPolicy && !isBarSource()) {
+        try { effective = initializeMissingBar(effective); }
+        catch (error) { barImportOk = false; warn('character-bar-initialize', error); }
+      }
       if (key === 'user' && !local && shortcuts.locked && uiCompatible(shortcuts) && (!applySkills || shortcuts.classJob !== session.job)) {
         try {
           const target = shortcutField(effective);
@@ -1031,7 +1088,7 @@ module.exports = function SettingsVault(mod) {
         session.userPacket = Buffer.from(buffer);
         try {
           if (!isBarSource() && barPolicy && !legacy && barImportOk) {
-            completeBar(incoming);
+            completeBar(effective);
             if (local && !localCompatible) {
               warn('character-bar-patch', new Error('Saved character bar belongs to another patch/class; use vault load after saving a compatible template.'));
             } else {
@@ -1041,7 +1098,7 @@ module.exports = function SettingsVault(mod) {
                 if (old && uiCompatible(old)) {
                   const target = shortcutField(effective), ids = new Set(shortcuts.commonSkills);
                   const slots = shortcutDocument(target).rows.filter(row => commonShortcut(row, ids));
-                  effective = captureUpdate(effective, applyCharacterShortcuts(target, shortcutField(incoming), old.rows, slots));
+                  effective = captureUpdate(effective, applyCharacterShortcuts(target, shortcutField(incoming) || shortcutField(effective), old.rows, slots));
                 }
               }
               completeBar(effective); barReady = true;
@@ -1057,6 +1114,7 @@ module.exports = function SettingsVault(mod) {
             session.keysApplied = applyKeys; session.skillsApplied = applySkills;
             session.characterBarApplied = barReady; session.barMode = barReady ? local ? 'character' : 'template' : 'source/native';
           }
+          restoreTrace('settings-restored', { kind: key, keysApplied: session.keysApplied, barApplied: session.characterBarApplied, barMode: session.barMode });
           syncCharacterBar();
           return false;
         }
@@ -1066,7 +1124,7 @@ module.exports = function SettingsVault(mod) {
         session.barMode = barReady ? local ? 'character' : 'template' : 'source/native'; syncCharacterBar();
       }
       if (key === 'account' && effective.equals(incoming)) syncCharacterBar();
-    } catch (error) { warn(name + '-layout', error); }
+    } catch (error) { restoreTrace('settings-error', { kind: key, reason: error.message }); warn(name + '-layout', error); }
   }
   function onSave(key, name, opcode, buffer) {
     if (!ready()) return;
@@ -1089,6 +1147,7 @@ module.exports = function SettingsVault(mod) {
   required.push(hook('S_LOGIN', mod.majorPatchVersion >= 114 ? 15 : 14, onLogin, -9000));
   required.push(hook('C_LOAD_TOPO_FIN', 'event', () => {
     if (session) session.loaded = true;
+    restoreTrace('loading-complete', { keysApplied: !!(session && session.keysApplied), barApplied: !!(session && session.characterBarApplied) });
     seedSharedShortcuts();
     syncCharacterBar();
   }));

@@ -15,9 +15,11 @@ Automatic module updates are enabled through this repository. Personal profiles,
 3. Run `vault save`, then `vault lock` in `/8` or the Toolbox command channel.
 4. Enter another character. The same class receives the full bar; another class receives common item/mount/buff slots while keeping its class skills elsewhere.
 
+A freshly created character can have no saved native bar controllers yet. The first import initializes the missing bar envelopes from the compatible template, carries over only common slots across classes, and preserves any native class skill slots that are already present.
+
 After that first import, each receiving character saves its **entire bar** separately: skills, brooches, mounts, items, moves and empty slots. Later logins use that character's own bar. Place its own mount/brooch once after loading; no extra save/lock command is needed. A native game save must be sent before an edit can be captured.
 
-**Keyboard bindings remain common**, including left-tray Numpad keys and main-bar keys. Private character bars contain slot contents, never keybinds. Chat, window positions and captured UI scale options also remain common across classes.
+**Keyboard bindings remain common**, including left-tray Numpad keys and main-bar keys. Private character bars contain slot contents, never the shared keyboard document. A receiving character’s automatic default keyboard save cannot erase the populated shared bindings; deliberate resets remain available on the main source character. Chat, window positions and captured UI scale options also remain common across classes.
 
 ## Commands
 
@@ -59,7 +61,7 @@ The resulting minimap resource has been confirmed in game on the supported local
 
 ## Personal data and recovery
 
-`data/profiles.json` holds class templates, private character bars, shared settings and ownership metadata. `data/profiles.json.bak` is its recovery copy. Keep `data/` when updating; never share it publicly. Diagnostics are private under `logs/`.
+`data/profiles.json` holds class templates, private character bars, shared settings and ownership metadata. `data/profiles.json.bak` is its recovery copy. Keep `data/` when updating; never share it publicly. Diagnostics are private under `logs/`. `restore-status.json` keeps at most 24 restore events for the latest login, including controller names and application status; it contains no character/account identifiers, key values, UI positions or raw settings.
 
 Partial native saves are merged with the complete capture. Initial/loading saves and failed deliveries cannot replace the source. Local writes are atomic, combined after 300 ms, and flushed on logout; this does not delay gameplay packets. Normal server saving continues. A damaged profile is recovered from a valid backup, with the damaged original preserved; without valid recovery, writes stop rather than clear your settings.
 
