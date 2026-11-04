@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const zlib = require('zlib');
-const VERSION = '1.2.4';
+const VERSION = '1.2.5';
 const parseDefinition = require('tera-data-parser/lib/parsers/def');
 const CLASSES = ['warrior', 'lancer', 'slayer', 'berserker', 'sorcerer', 'archer',
   'priest', 'mystic', 'reaper', 'gunner', 'brawler', 'ninja', 'valkyrie'];
@@ -47,25 +47,42 @@ function emptyState() { return { version: 1, classes: {}, legacy: {}, characterS
   ui: { locked: false, windows: [], account: null, patch: null, savedAt: null },
   keys: { locked: false, user: null, patch: null, savedAt: null },
   shortcuts: { locked: false, controller: null, commonSkills: [], templateId: null, source: null, writer: null, patch: null, savedAt: null } }; }
+function uiWindowIssue(row) {
+  if (!row || typeof row.name !== 'string' || !row.name.length || row.name.length > 160 ||
+      /[\x00-\x1f\x7f]/.test(row.name)) return 'name';
+  if (!Number.isInteger(row.mode) || row.mode < 0 || row.mode > 0xffffffff) return 'mode';
+  if (!Number.isFinite(row.x) || !Number.isFinite(row.y) || Math.abs(row.x) > 100000 || Math.abs(row.y) > 100000) return 'position';
+  return null;
+}
 function uiWindows(input) {
   if (!Array.isArray(input) || input.length > 512) throw new Error('Invalid UI window list');
   const names = new Set();
   return input.map(row => {
-    if (!row || typeof row.name !== 'string' || !row.name.length || row.name.length > 160 ||
-        /[\x00-\x1f\x7f]/.test(row.name) || names.has(row.name) ||
-        !Number.isInteger(row.mode) || row.mode < 0 || row.mode > 0xffffffff ||
-        !Number.isFinite(row.x) || !Number.isFinite(row.y) || Math.abs(row.x) > 100000 || Math.abs(row.y) > 100000)
-      throw new Error('Invalid UI window entry');
+    const issue = uiWindowIssue(row);
+    if (issue) throw new Error('Invalid UI window entry (' + issue + ')');
+    if (names.has(row.name)) throw new Error('Invalid UI window entry (duplicate name)');
     names.add(row.name);
     return { name: row.name, mode: row.mode, x: row.x, y: row.y };
   });
+}
+// Client saves are deltas: ignore unusable rows, retain the last valid update per window.
+// Stored profiles and server replies still use strict validation. Never invent coordinates.
+function usableUiSave(rows, issues) {
+  const valid = new Map();
+  for (const row of rows) {
+    const issue = uiWindowIssue(row);
+    if (issue) { issues[issue] = (issues[issue] || 0) + 1; continue; }
+    if (valid.has(row.name)) issues.duplicates = (issues.duplicates || 0) + 1;
+    valid.set(row.name, row);
+  }
+  return uiWindows([...valid.values()]);
 }
 function mergeUiWindows(previous, incoming) {
   const rows = new Map(uiWindows(previous).map(row => [row.name, row]));
   for (const row of uiWindows(incoming)) rows.set(row.name, row);
   return uiWindows([...rows.values()]);
 }
-function readUiPacket(buffer, save) {
+function readUiPacket(buffer, save, issues) {
   const prefix = save ? 16 : 8, fixed = save ? 15 : 18;
   if (!Buffer.isBuffer(buffer) || buffer.length < prefix || buffer.length > 65535 || buffer.readUInt16LE(0) !== buffer.length)
     throw new Error('Unsupported UI packet envelope');
@@ -88,7 +105,7 @@ function readUiPacket(buffer, save) {
     if (next !== (i === count - 1 ? 0 : at)) throw new Error('Unsupported UI array links');
   }
   if (at !== buffer.length) throw new Error('Unknown UI packet trailing data');
-  return uiWindows(rows);
+  return save && issues ? usableUiSave(rows, issues) : uiWindows(rows);
 }
 function uiReply(buffer, windows) {
   const rows = uiWindows(windows), strings = rows.map(row => Buffer.from(row.name + '\0', 'utf16le'));
@@ -672,6 +689,7 @@ module.exports = function SettingsVault(mod) {
   const hooks = [], warnings = new Set();
   let restoreEvents = [];
   const message = text => mod.command.message(text);
+  const legacyUiCleanup = require('./lib/ui-legacy-cleanup').create(mod, {document, fields, protobuf, boundedInflate, rawData, replaceRaw});
   const uiLayoutTrace = createUiLayoutTrace(mod, root, () => ({
     class: session ? CLASSES[session.job] : null, loaded: !!(session && session.loaded), account: draft.account
   }));
@@ -990,7 +1008,8 @@ module.exports = function SettingsVault(mod) {
   }
   function onUiSave(opcode, buffer) {
     try {
-      const incoming = readUiPacket(buffer, true), shared = commonUi();
+      const issues = {}, incoming = readUiPacket(buffer, true, issues), shared = commonUi();
+      if (Object.keys(issues).length) restoreTrace('ui-save-filtered', { ...issues, accepted: incoming.length });
       if (!incoming.length) return;
       if (mod.game.accountId != null && buffer.readBigUInt64LE(8).toString() !== String(mod.game.accountId)) {
         warn('ui-save-owner', new Error('Ignored UI save for a different account.')); return;
@@ -1241,7 +1260,7 @@ module.exports = function SettingsVault(mod) {
       if (action === 'save') message('Shared UI saved. Use vault ui lock to apply it across all classes/accounts.');
     } catch (error) { warn('ui-profile-write', error); message('Shared UI operation failed: ' + error.message); }
   }
-  function command(action, detail) {
+  function command(action, detail, label) {
     if (String(action || '').toLowerCase() === 'ui') { uiCommand(detail); return; }
     if (String(action || '').toLowerCase() === 'minimap' && String(detail || '').toLowerCase() === 'pin') {
       message('Minimap setup is automatic for supported clients at a safe startup. Check the Toolbox window for its result. Restart Toolbox before launching TERA; minimap.cmd is only for recovery or manual setup.');
@@ -1324,6 +1343,7 @@ module.exports = function SettingsVault(mod) {
   }
   mod.command.add('vault', command);
   this.destructor = () => {
+    legacyUiCleanup.close();
     uiLayoutTrace.close();
     closed = true; leave(); mod.game.removeListener('leave_game', leave);
     for (const h of hooks) mod.unhook(h);
