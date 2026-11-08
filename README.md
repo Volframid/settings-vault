@@ -2,6 +2,10 @@
 
 Save a main setup for each TERA class, initialize other characters from it, and keep their later bar edits separate. Keyboard bindings, chat and UI layout are shared. Supports all 13 classes.
 
+## Runtime efficiency
+
+Optional UI diagnostics keep only the latest immutable bytes for each supported packet type. Hashing and hexadecimal formatting are deferred until a log or snapshot needs them; logging stays off by default. Profile restoration, source protection and minimap behavior are unchanged.
+
 ## Install
 
 Download the [latest release](https://github.com/Volframid/settings-vault/releases/latest), extract `settings-vault` into your Toolbox `mods` folder, then restart Toolbox. Disable other settings/chat saver modules to avoid conflicting restores.
@@ -19,7 +23,7 @@ A freshly created character can have no saved native bar controllers yet. The fi
 
 After that first import, each receiving character saves its **entire bar** separately: skills, brooches, mounts, items, moves and empty slots. Later logins use that character's own bar. Place its own mount/brooch once after loading; no extra save/lock command is needed. A native game save must be sent before an edit can be captured.
 
-**Keyboard bindings remain common**, including left-tray Numpad keys and main-bar keys. Private character bars contain slot contents, never the shared keyboard document. A receiving characterÃ¢â‚¬â„¢s automatic default keyboard save cannot erase the populated shared bindings; deliberate resets remain available on the main source character. Chat, window positions and captured UI scale options also remain common across classes.
+**Keyboard bindings remain common**, including left-tray Numpad keys and main-bar keys. Private character bars contain slot contents, never the shared keyboard document. A receiving character's automatic default keyboard save cannot erase the populated shared bindings; deliberate resets remain available on the main source character. Chat, window positions and captured UI scale options also remain common across classes.
 
 ## Commands
 

@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const zlib = require('zlib');
-const VERSION = '1.2.5';
+const VERSION = '1.2.6';
 const parseDefinition = require('tera-data-parser/lib/parsers/def');
 const CLASSES = ['warrior', 'lancer', 'slayer', 'berserker', 'sorcerer', 'archer',
   'priest', 'mystic', 'reaper', 'gunner', 'brawler', 'ninja', 'valkyrie'];
@@ -594,6 +594,11 @@ function createUiLayoutTrace(mod, root, getSnapshot) {
   const hooks = [], available = [], cache = new Map();
   let stream = null, file = null, bytes = 0, dropped = 0, packetCount = 0;
   const maxBytes = 4 * 1024 * 1024;
+  function materialize(packet) {
+    return { name: packet.name, opcode: packet.opcode, observedAt: packet.observedAt,
+      bytes: packet.buffer.length, hash: crypto.createHash('sha256').update(packet.buffer).digest('hex'),
+      raw: packet.buffer.toString('hex') };
+  }
   function stop(reason) {
     if (!stream) return;
     const previous = stream; stream = null;
@@ -618,11 +623,9 @@ function createUiLayoutTrace(mod, root, getSnapshot) {
         // Observe native data only. Never replay an unknown layout or suppress a packet.
         if (!Buffer.isBuffer(buffer) || buffer.length < 4 || buffer.length > 65535 ||
             buffer.readUInt16LE(0) !== buffer.length) return;
-        const packet = { name, opcode, observedAt: new Date().toISOString(),
-          bytes: buffer.length, hash: crypto.createHash('sha256').update(buffer).digest('hex'),
-          raw: buffer.toString('hex') };
+        const packet = { name, opcode, observedAt: new Date().toISOString(), buffer: Buffer.from(buffer) };
         cache.set(name, packet); packetCount++;
-        write('NATIVE_UI_PACKET', { ...packet, cached: false });
+        if (stream) write('NATIVE_UI_PACKET', { ...materialize(packet), cached: false });
       }));
       available.push(name);
     } catch (error) { mod.warn('UI capture unavailable for ' + name + ': ' + error.message); }
@@ -654,7 +657,7 @@ function createUiLayoutTrace(mod, root, getSnapshot) {
       });
       write('START', { format: 1, moduleVersion: VERSION, patch: mod.majorPatchVersion });
       snapshot();
-      for (const packet of cache.values()) write('NATIVE_UI_PACKET', { ...packet, cached: true });
+      for (const packet of cache.values()) write('NATIVE_UI_PACKET', { ...materialize(packet), cached: true });
       mod.command.message('UI log ON: ' + file + '. Move your boss bar, buff bar and menu bar; then use vault ui log again.');
     } catch (error) { stop('start-error'); mod.warn('UI log could not start: ' + error.message); }
   }
